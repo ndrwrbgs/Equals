@@ -1,5 +1,9 @@
-﻿using System;
+﻿using Mono.Cecil;
+using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using Mono.Cecil.Cil;
 using Xunit;
 
 public partial class IntegrationTests
@@ -506,6 +510,68 @@ public partial class IntegrationTests
     }
 
     [Fact]
+    /// <summary>
+    /// In this way, places we differ in IL from what the expected code would generate must be explicitly accepted, rather
+    /// than implicitly not even noticed
+    /// </summary>
+    [Fact]
+    public void InsteadOfTestingTheImpact_CanWeTestTheActualImplementation()
+    {
+        var fodyModifiedType = (TypeInfo) testResult.Assembly.GetType(nameof(NormalClass));
+        var expectedFinalResult = (TypeInfo) typeof(NormalClassResult) /* TODO: Forced cast based on debugger, but is there a 'proper' way to do this? */;
+
+        var monoFodyModifiedType = AssemblyDefinition.ReadAssembly(testResult.AssemblyPath)
+            .MainModule.GetType(fodyModifiedType.Name);
+        var monoExpectedFinalResult = AssemblyDefinition.ReadAssembly(expectedFinalResult.Assembly.Location)
+            .MainModule.GetType(expectedFinalResult.Name);
+
+        // TODO: Handle other Declared items (fields/properties/etc? -- even if we are assuming those don't change, we should assert such)
+        var expected = monoFodyModifiedType;
+        var actual = monoExpectedFinalResult; // TODO: Reverse these, for now trying to figure out what IS expected
+        foreach (var expectedMethod in expected.Methods)
+        {
+            var expectedSignature = expectedMethod.ToString();
+
+            // TODO: Possible false-positive replace on substring matches, may be okay since we control the classes/tests, but worth noting
+            expectedSignature = expectedSignature.Replace(nameof(NormalClass), nameof(NormalClassResult));
+            var sameSignature = actual.Methods
+                .SingleOrDefault(m => string.Equals(m.ToString(), expectedSignature, StringComparison.Ordinal));
+            if (sameSignature == null)
+            {
+                Assert.True(false, "No match found for " + expectedMethod);
+            }
+
+            // TODO: Test more than just the opcodes, the full IL?
+            // TODO: Is there a Mono comparer out there somewhere so we don't reinvent the wheel?
+            var expectedBody = expectedMethod.Body
+                .Instructions
+                .Select(i => i.OpCode)
+                // We inject Nops in this library
+                .Where(o => o != OpCodes.Nop)
+                .ToArray();
+            var actualBody = sameSignature.Body
+                .Instructions
+                .Select(i => i.OpCode)
+                .ToArray();
+
+            // TODO: The compiler optimizes ReferenceEquals in Equals to brfalse and beq.s, we should also
+            if (expectedMethod.ToString().Equals("System.Boolean NormalClass::Equals(NormalClass)")
+                || expectedMethod.ToString().Equals("System.Boolean NormalClass::Equals(System.Object)"))
+            {
+                continue;
+            }
+
+            // For GetHashCode - our IL seems to get the value and store it in an intermediate, whereas the retail version seems to avoid this itnermediate
+            // using only the stack
+            if (expectedMethod.ToString().Equals("System.Int32 NormalClass::GetHashCode()"))
+            {
+                continue;
+            }
+
+            Assert.Equal(expectedBody, actualBody);
+        }
+    }
+
     public void Equals_should_return_true_for_class_with_static_properties()
     {
         var type = testResult.Assembly.GetType("ClassWithStaticProperties");
